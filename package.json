@@ -10,14 +10,22 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:vscode-webf.helloWorld"
+    "*",
+    "onCommand:webf.runDebug",
+    "onDebug"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "vscode-webf.helloWorld",
-        "title": "Hello World"
+        "command": "webf.runDebug",
+        "title": "Debug WebF Apps"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "webf",
+        "label": "webf javascript debug"
       }
     ]
   },
@@ -49,6 +57,10 @@
     "webpack-cli": "^4.10.0"
   },
   "dependencies": {
+    "@types/websocket": "^1.0.5",
+    "await-notify": "1.0.1",
+    "source-map": "^0.7.4",
+    "vscode-debugadapter": "^1.51.0",
     "websocket": "^1.0.34"
   }
 }
