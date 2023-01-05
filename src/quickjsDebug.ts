@@ -1,30 +1,37 @@
 // import * as CP from 'child_process';
 import * as WebSocket from 'websocket';
 import { basename } from 'path';
+import * as vscode from 'vscode';
+import { spawn, ChildProcess, execSync } from 'child_process';
 import { MappedPosition } from 'source-map';
 import { InitializedEvent, Logger, logger, OutputEvent, Scope, Source, StackFrame, Thread } from 'vscode-debugadapter';
 import { DebugProtocol } from 'vscode-debugprotocol';
 import { SourcemapArguments } from './sourcemapArguments';
 import { SourcemapSession } from "./sourcemapSession";
-const path = require('path');
-const { Subject } = require('await-notify');
+import { getVSCodeDownloadUrl } from '@vscode/test-electron/out/util';
 // const Parser = require('stream-parser');
 // const Transform = require('stream').Transform
 
 interface CommonArguments extends SourcemapArguments {
-  program: string;
-  args?: string[];
-  cwd?: string;
-  runtimeExecutable: string;
-  mode: string;
-  address: string;
-  port: number;
-  console?: ConsoleType;
-  trace?: boolean;
+  // program: string;
+  // args?: string[];
+  // cwd?: string;
+  // runtimeExecutable: string;
+  // mode: string;
+  // address: string;
+  // port: number;
+  // console?: ConsoleType;
+  // trace?: boolean;
 }
 interface LaunchRequestArguments extends CommonArguments, DebugProtocol.LaunchRequestArguments {
+  name: string;
+  program?: string;
+  url?: string;
 }
 interface AttachRequestArguments extends CommonArguments, DebugProtocol.AttachRequestArguments {
+  name: string;
+  port?: number;
+  host?: string;
 }
 
 // /**
@@ -62,7 +69,9 @@ interface PendingResponse {
 
 export class QuickJSDebugSession extends SourcemapSession {
   private static RUNINTERMINAL_TIMEOUT = 5000;
+  private static REMOTE_DEBUGGING_PORT = 9333;
 
+  private _webfApp?: ChildProcess;
   private _remoteClient?: WebSocket.client;
   private _wsConnection?: WebSocket.connection;
   private _supportsRunInTerminalRequest = false;
@@ -83,10 +92,6 @@ export class QuickJSDebugSession extends SourcemapSession {
   private _stackFrames = new Map<number, number>();
   private _variables = new Map<number, number>();
   private _commonArgs?: CommonArguments;
-  private _argsSubject = new Subject();
-  private _argsReady = (async () => {
-    await this._argsSubject.wait();
-  })();
 
   public constructor() {
     super("quickjs-debug.txt");
@@ -212,26 +217,23 @@ export class QuickJSDebugSession extends SourcemapSession {
   protected disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments, request?: DebugProtocol.Request): void {
     this.closeServer();
     this.closeConnection();
+    this.closeWebFClient();
     this.sendResponse(response);
   }
 
   protected async attachRequest(response: DebugProtocol.AttachResponse, args: AttachRequestArguments, request?: DebugProtocol.Request) {
     this._commonArgs = args;
-    this._argsSubject.notify();
-    await this.beforeConnection({});
+    await this.connectToWebF(args.host!, args.port?.toString() ?? '9222');
     this.sendResponse(response);
   }
 
   protected async launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchRequestArguments) {
     this._commonArgs = args;
-    this._argsSubject.notify();
-
-    this._commonArgs.localRoot = args.localRoot;
     this.closeServer();
+    this.lauchWebFClient(args);
 
-    let env = {};
     try {
-      await this.beforeConnection(env);
+      await this.connectToWebF('localhost', QuickJSDebugSession.REMOTE_DEBUGGING_PORT.toString());
     }
     catch (e) {
       this.sendErrorResponse(response, 17, e.message);
@@ -240,25 +242,25 @@ export class QuickJSDebugSession extends SourcemapSession {
 
     // let cwd = <string>args.cwd || path.dirname(args.program);
 
-    if (typeof args.console === 'string') {
-      switch (args.console) {
-        case 'internalConsole':
-        case 'integratedTerminal':
-        case 'externalTerminal':
-          this._console = args.console;
-          break;
-        default:
-          this.sendErrorResponse(response, 2028, `Unknown console type '${args.console}'.`);
-          return;
-      }
-    }
+    // if (typeof args.console === 'string') {
+    //   switch (args.console) {
+    //     case 'internalConsole':
+    //     case 'integratedTerminal':
+    //     case 'externalTerminal':
+    //       this._console = args.console;
+    //       break;
+    //     default:
+    //       this.sendErrorResponse(response, 2028, `Unknown console type '${args.console}'.`);
+    //       return;
+    //   }
+    // }
 
     this.sendResponse(response);
   }
 
-  private beforeConnection(env: any) {
+  private connectToWebF(host: string, port: string) {
     // make sure to 'Stop' the buffered logging if 'trace' is not set
-    logger.setup(this._commonArgs!.trace ? Logger.LogLevel.Verbose : Logger.LogLevel.Stop, false);
+    logger.setup(Logger.LogLevel.Verbose);
 
     // const address = this._commonArgs!.address || 'localhost';
     this._remoteClient = new WebSocket.client();
@@ -279,16 +281,14 @@ export class QuickJSDebugSession extends SourcemapSession {
         }
       });
       this._wsConnection = connection;
-
       if (this._pendingMessages.length > 0) {
         for(let message of this._pendingMessages) {
           this.sendThreadMessage(message);
         }
       }
-
     });
 
-    this._remoteClient.connect('ws://192.168.50.33:9222');
+    this._remoteClient.connect(`ws://${host}:${port}`);
   }
 
   // private _captureOutput(process: CP.ChildProcess) {
@@ -301,17 +301,15 @@ export class QuickJSDebugSession extends SourcemapSession {
   // }
 
   async getArguments(): Promise<SourcemapArguments> {
-    await this._argsReady;
     return this._commonArgs!;
   }
 
   public async logTrace(message: string) {
-    await this._argsReady;
-    if (this._commonArgs!.trace) { this.log(message); }
+    // if (this._commonArgs!.trace) { this.log(message); }
   }
 
-  public log(message: string) {
-    this.sendEvent(new OutputEvent(message + '\n', 'console'));
+  public log(message: string, category: string = 'console') {
+    this.sendEvent(new OutputEvent(message + '\n', category));
   }
 
   // private _terminated(reason: string): void {
@@ -324,6 +322,28 @@ export class QuickJSDebugSession extends SourcemapSession {
   //     this.sendEvent(new TerminatedEvent());
   //   }
   // }
+
+  private async lauchWebFClient(args: LaunchRequestArguments) {
+    let entryPoint = args.program || args.url;
+
+    if (!entryPoint) {
+      vscode.window.showErrorMessage('Please add `url` or `program` property on your debugger launch config.', {modal: true});
+      return;
+    }
+
+    this._webfApp = spawn('webf', ['run', entryPoint, '--remote-debugging-port', QuickJSDebugSession.REMOTE_DEBUGGING_PORT.toString()]);
+
+    this._webfApp!.stdout!.on('data', (data) => {
+      this.log(data.toString(), 'stdout');
+    });
+    console.log(entryPoint);
+  }
+
+  private async closeWebFClient() {
+    if (this._webfApp) {
+      execSync(`kill -s SIGTERM ${this._webfApp.pid}`, {shell: '/bin/bash'});
+    }
+  }
 
   private async closeServer() {
     if (this._remoteClient) {
@@ -381,29 +401,29 @@ export class QuickJSDebugSession extends SourcemapSession {
       dirtySources.add(existingBreakpoint.source);
     }
 
-    // map the new breakpoints for a file, and mapped files that get touched.
-    const bps = args.breakpoints || [];
-    const mappedBreakpoints: MappedPosition[] = [];
-    for (let bp of bps) {
-      const mappedPositions = await this.translateFileLocationToRemote({
-        source: args.source.path,
-        column: bp.column || 0,
-        line: bp.line,
-      });
+    // // map the new breakpoints for a file, and mapped files that get touched.
+    // const bps = args.breakpoints || [];
+    // const mappedBreakpoints: MappedPosition[] = [];
+    // for (let bp of bps) {
+    //   const mappedPositions = await this.translateFileLocationToRemote({
+    //     source: args.source.path,
+    //     column: bp.column || 0,
+    //     line: bp.line,
+    //   });
 
-      for (let mapped of mappedPositions) {
-        dirtySources.add(mapped.source);
-        mappedBreakpoints.push(mapped);
-      }
-    }
+    //   for (let mapped of mappedPositions) {
+    //     dirtySources.add(mapped.source);
+    //     mappedBreakpoints.push(mapped);
+    //   }
+    // }
 
     // update the entry for this file
-    if (args.breakpoints) {
-      this._breakpoints.set(args.source.path, mappedBreakpoints);
-    }
-    else {
-      this._breakpoints.delete(args.source.path);
-    }
+    // if (args.breakpoints) {
+    //   this._breakpoints.set(args.source.path, mappedBreakpoints);
+    // }
+    // else {
+    //   this._breakpoints.delete(args.source.path);
+    // }
 
     for (let file of dirtySources) {
       await this.sendBreakpointMessage(file);
@@ -437,36 +457,36 @@ export class QuickJSDebugSession extends SourcemapSession {
   }
 
   protected async stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments) {
-    const thread = args.threadId;
-    const body = await this.sendThreadRequest(args.threadId, response, args);
+    // const thread = args.threadId;
+    // const body = await this.sendThreadRequest(args.threadId, response, args);
 
-    const stackFrames: StackFrame[] = [];
-    for (const { id, name, filename, line, column } of body) {
-      let mappedId = id + thread;
-      this._stackFrames.set(mappedId, thread);
+    // const stackFrames: StackFrame[] = [];
+    // for (const { id, name, filename, line, column } of body) {
+    //   let mappedId = id + thread;
+    //   this._stackFrames.set(mappedId, thread);
 
-      try {
-        const mappedLocation = await this.translateRemoteLocationToLocal({
-          source: filename,
-          line: line || 0,
-          column: column || 0,
-        });
-        if (!mappedLocation.source) { throw new Error('map failed'); }
-        const source = new Source(basename(mappedLocation.source), this.convertClientPathToDebugger(mappedLocation.source));
-        stackFrames.push(new StackFrame(mappedId, name, source, mappedLocation.line, mappedLocation.column));
-      }
-      catch (e) {
-        stackFrames.push(new StackFrame(mappedId, name, filename, line, column));
-      }
-    }
+    //   try {
+    //     const mappedLocation = await this.translateRemoteLocationToLocal({
+    //       source: filename,
+    //       line: line || 0,
+    //       column: column || 0,
+    //     });
+    //     if (!mappedLocation.source) { throw new Error('map failed'); }
+    //     const source = new Source(basename(mappedLocation.source), this.convertClientPathToDebugger(mappedLocation.source));
+    //     stackFrames.push(new StackFrame(mappedId, name, source, mappedLocation.line, mappedLocation.column));
+    //   }
+    //   catch (e) {
+    //     stackFrames.push(new StackFrame(mappedId, name, filename, line, column));
+    //   }
+    // }
 
-    const totalFrames = body.length;
+    // const totalFrames = body.length;
 
-    response.body = {
-      stackFrames,
-      totalFrames,
-    };
-    this.sendResponse(response);
+    // response.body = {
+    //   stackFrames,
+    //   totalFrames,
+    // };
+    // this.sendResponse(response);
   }
 
   protected async scopesRequest(response: DebugProtocol.ScopesResponse, args: DebugProtocol.ScopesArguments) {
@@ -525,7 +545,7 @@ export class QuickJSDebugSession extends SourcemapSession {
 
     this.logTrace(`sent: ${JSON.stringify(message)}`);
     let json = JSON.stringify({
-      isDap: true,
+      vscode: true,
       data: message
     });
     this._wsConnection?.sendUTF(json);

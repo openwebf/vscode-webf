@@ -1,43 +1,53 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
+import { spawn, spawnSync } from 'child_process';
 import { activateWebFDebug } from './activateWebFDebug';
-
-let debugStatusItem: vscode.StatusBarItem;
-// let isDebuggering = false;
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
-	activateWebFDebug(context);
+  activateWebFDebug(context);
 
-  // register a command that is invoked when the status bar
-	// item is selected
-	const myCommandId = 'webf.runDebug';
-	context.subscriptions.push(vscode.commands.registerCommand(myCommandId, () => {
-    console.log('run debug..');
-    // isDebuggering = true;
-	}));
-
-  // create a new status bar item that we can now manage
-	debugStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-	debugStatusItem.command = myCommandId;
-  debugStatusItem.text = 'Debug WebF';
-	context.subscriptions.push(debugStatusItem);
-
-  // register some listener that make sure the status bar 
-	// item always up-to-date
-	context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(updateStatusBarItem));
-	context.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(updateStatusBarItem));
-
-  debugStatusItem.show();
+  checkWebFCommand();
 }
 
-function updateStatusBarItem(): void {
-	// isDebuggering = true;
-  debugStatusItem.text = 'debugging..';
+async function checkWebFCommand() {
+  let result = spawnSync('type', ['webf'], { encoding: 'utf-8' });
+  if (result.status !== 0) {
+    const selection = await vscode.window.showWarningMessage('The `webf` command not found on PATH.', 'Install it for me', 'Ignore');
+    if (selection === 'Install it for me') {
+      vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: "Installing..",
+        cancellable: true
+      }, (progress, token) => {
+        const installer = spawn('npm', ['install', '-g', '@openwebf/cli'], { stdio: 'inherit' });
+        token.onCancellationRequested(() => {
+          installer.kill();
+        });
+
+        progress.report({ increment: 0 });
+
+        setTimeout(() => {
+          progress.report({ increment: 10});
+        }, 1000);
+
+        setTimeout(() => {
+          progress.report({ increment: 40});
+        }, 2000);
+
+        const p = new Promise<void>(resolve => {
+          installer.on('exit', () => {
+            resolve();
+          });
+        });
+        return p;
+      });
+    }
+  }
 }
 
 
 // This method is called when your extension is deactivated
-export function deactivate() {}
+export function deactivate() { }
