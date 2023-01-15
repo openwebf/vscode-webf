@@ -4,13 +4,15 @@ import { basename } from 'path';
 import * as vscode from 'vscode';
 import { spawn, ChildProcess, execSync } from 'child_process';
 import { MappedPosition } from 'source-map';
-import { InitializedEvent, Logger, logger, OutputEvent, Scope, Source, StackFrame, Thread } from 'vscode-debugadapter';
+import { InitializedEvent, Logger, logger, OutputEvent, Scope, Source, StackFrame, StoppedEvent, Thread, ThreadEvent } from 'vscode-debugadapter';
 import { DebugProtocol } from 'vscode-debugprotocol';
 import { SourcemapArguments } from './sourcemapArguments';
 import { SourcemapSession } from "./sourcemapSession";
 import { getVSCodeDownloadUrl } from '@vscode/test-electron/out/util';
 // const Parser = require('stream-parser');
 // const Transform = require('stream').Transform
+
+let _seq = 0;
 
 interface CommonArguments extends SourcemapArguments {
   // program: string;
@@ -69,7 +71,7 @@ interface PendingResponse {
 
 export class QuickJSDebugSession extends SourcemapSession {
   private static RUNINTERMINAL_TIMEOUT = 5000;
-  private static REMOTE_DEBUGGING_PORT = 9333;
+  private static REMOTE_DEBUGGING_PORT = 9222;
 
   private _webfApp?: ChildProcess;
   private _remoteClient?: WebSocket.client;
@@ -78,7 +80,6 @@ export class QuickJSDebugSession extends SourcemapSession {
   private _console: ConsoleType = 'internalConsole';
   private _pendingMessages: any[] = [];
   // private _isTerminated: boolean = false;
-  private _threads = new Set<number>();
   private _requests = new Map<number, PendingResponse>();
   // contains a list of real source files and their source mapped breakpoints.
   // ie: file1.ts -> webpack.main.js:59
@@ -87,9 +88,8 @@ export class QuickJSDebugSession extends SourcemapSession {
   // then filter the breakpoint values for those touched files.
   // sending only the mapped breakpoints from file1.ts would clobber existing
   // breakpoints from file2.ts, as they both map to webpack.main.js.
-  private _breakpoints = new Map<string, MappedPosition[]>();
+  private _breakpoints = new Map<string, DebugProtocol.BreakpointLocation[]>();
   private _stopOnException = false;
-  private _stackFrames = new Map<number, number>();
   private _variables = new Map<number, number>();
   private _commonArgs?: CommonArguments;
 
@@ -137,86 +137,56 @@ export class QuickJSDebugSession extends SourcemapSession {
     this.sendEvent(new InitializedEvent());
   }
 
-  // private handleEvent(thread: number, event: any) {
-  //   if (event.type === 'StoppedEvent') {
-  //     if (event.reason !== 'entry') { this.sendEvent(new StoppedEvent(event.reason, thread)); }
-  //   }
-  //   else if (event.type === 'terminated') {
-  //     this._terminated('remote terminated');
-  //   }
-  //   else if (event.type === "ThreadEvent") {
-  //     const threadEvent = new ThreadEvent(event.reason, thread);
-  //     if (threadEvent.body.reason === 'new') { this._threads.add(thread); }
-  //     else if (threadEvent.body.reason === 'exited') { this._threads.delete(thread); }
-  //     this.sendEvent(threadEvent);
-  //   }
-  // }
+  private handleResponse(response: DebugProtocol.Response) {
+    let seq = response.request_seq;
+    let pending = this._requests.get(seq);
+    if (!pending) {
+      this.logTrace(`request not found: ${seq}`);
+      return;
+    }
+    this._requests.delete(seq);
+    pending.resolve(response);
+  }
 
-  // private handleResponse(json: any) {
-  //   let request_seq: number = json.request_seq;
-  //   let pending = this._requests.get(request_seq);
-  //   if (!pending) {
-  //     this.logTrace(`request not found: ${request_seq}`);
-  //     return;
-  //   }
-  //   this._requests.delete(request_seq);
-  //   if (json.error) { pending.reject(new Error(json.error)); }
-  //   else { pending.resolve(json.body); }
-  // }
+  private handleEvent(event: DebugProtocol.Event) {
+    switch (event.event) {
+      case 'thread': {
+        const body = (event as DebugProtocol.ThreadEvent).body;
+        const threadId = body.threadId;
+        this.sendEvent(event);
+        this.logTrace(`received event (thread ${threadId})`);
+        break;
+      }
+      case 'stopped': {
+        const body = (event as DebugProtocol.ThreadEvent).body;
+        if (body.reason !== 'entry') {
+          this.sendEvent(event);
+        }
+        break;
+      }
+    }
+  }
 
-  // private async newSession() {
-  //   let files = new Set<string>();
-  //   for (let bps of this._breakpoints.values()) {
-  //     for (let bp of bps) {
-  //       files.add(bp.source);
-  //     }
-  //   }
-  //   for (let file of files) {
-  //     await this.sendBreakpointMessage(file);
-  //   }
-
-  //   this.sendThreadMessage({
-  //     type: 'stopOnException',
-  //     stopOnException: this._stopOnException,
-  //   });
-
-  //   this.sendThreadMessage({ type: 'continue' });
-  // }
-
-  // private onSocket(socket: Socket) {
-  //   this.closeConnection();
-  //   this._connection = socket;
-  //   this.newSession();
-
-  //   let parser = new MessageParser();
-  //   parser.on('message', json => {
-  //     // the very first message will include the thread id, as it will be a stopped event.
-  //     if (json.type === 'event') {
-  //       const thread = json.event.thread;
-  //       if (!this._threads.has(thread)) {
-  //         this._threads.add(thread);
-  //         this.sendEvent(new ThreadEvent("new", thread));
-  //         this.emit('quickjs-thread');
-  //       }
-  //       this.logTrace(`received message (thread ${thread}): ${JSON.stringify(json)}`);
-  //       this.handleEvent(thread, json.event);
-  //     }
-  //     else if (json.type === 'response') {
-  //       this.handleResponse(json);
-  //     }
-  //     else {
-  //       this.logTrace(`unknown message ${json.type}`);
-  //     }
-  //   });
-
-  //   socket.pipe(parser as any); 
-  //   socket.on('error', e => this._terminated(e.toString()));
-  //   socket.on('close', () => this._terminated('close'));
-  // }
+  private async newSession() {
+    // Collection all setted breakpoints;
+    // let files = new Set<string>();
+    // for (let bps of this._breakpoints.values()) {
+    //   for (let bp of bps) {
+    //     files.add(bp);
+    //   }
+    // }
+    // for (let file of files) {
+    //   await this.sendBreakpointMessage(file);
+    // }
+    // this.sendThreadMessage({
+    //   type: 'stopOnException',
+    //   stopOnException: this._stopOnException,
+    // });
+    // this.sendThreadMessage({ type: 'continue' });
+  }
 
   protected disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments, request?: DebugProtocol.Request): void {
     this.closeServer();
-    this.closeConnection();
     this.closeWebFClient();
     this.sendResponse(response);
   }
@@ -230,7 +200,7 @@ export class QuickJSDebugSession extends SourcemapSession {
   protected async launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchRequestArguments) {
     this._commonArgs = args;
     this.closeServer();
-    this.lauchWebFClient(args);
+    // this.lauchWebFClient(args);
 
     try {
       await this.connectToWebF('localhost', QuickJSDebugSession.REMOTE_DEBUGGING_PORT.toString());
@@ -239,21 +209,6 @@ export class QuickJSDebugSession extends SourcemapSession {
       this.sendErrorResponse(response, 17, e.message);
       return;
     }
-
-    // let cwd = <string>args.cwd || path.dirname(args.program);
-
-    // if (typeof args.console === 'string') {
-    //   switch (args.console) {
-    //     case 'internalConsole':
-    //     case 'integratedTerminal':
-    //     case 'externalTerminal':
-    //       this._console = args.console;
-    //       break;
-    //     default:
-    //       this.sendErrorResponse(response, 2028, `Unknown console type '${args.console}'.`);
-    //       return;
-    //   }
-    // }
 
     this.sendResponse(response);
   }
@@ -267,6 +222,7 @@ export class QuickJSDebugSession extends SourcemapSession {
     this._remoteClient.on('connectFailed', () => {
     });
 
+    const self = this;
     this._remoteClient.on('connect', connection => {
       console.log('WebSocket Client Connected');
       connection.on('error', function (error) {
@@ -278,27 +234,27 @@ export class QuickJSDebugSession extends SourcemapSession {
       connection.on('message', function (message) {
         if (message.type === 'utf8') {
           console.log("Received: '" + message.utf8Data + "'");
+          const json = JSON.parse(message.utf8Data);
+          if (json.type === 'event') {
+            self.handleEvent(json);
+          } else if (json.type === 'response') {
+            self.handleResponse(json);
+          } else {
+            self.logTrace(`unknown message ${json}`);
+          }
         }
       });
       this._wsConnection = connection;
       if (this._pendingMessages.length > 0) {
-        for(let message of this._pendingMessages) {
+        for (let message of this._pendingMessages) {
           this.sendThreadMessage(message);
         }
       }
+      this.newSession();
     });
 
     this._remoteClient.connect(`ws://${host}:${port}`);
   }
-
-  // private _captureOutput(process: CP.ChildProcess) {
-  //   process.stdout!.on('data', (data: string) => {
-  //     this.sendEvent(new OutputEvent(data.toString(), 'stdout'));
-  //   });
-  //   process.stderr!.on('data', (data: string) => {
-  //     this.sendEvent(new OutputEvent(data.toString(), 'stderr'));
-  //   });
-  // }
 
   async getArguments(): Promise<SourcemapArguments> {
     return this._commonArgs!;
@@ -312,22 +268,11 @@ export class QuickJSDebugSession extends SourcemapSession {
     this.sendEvent(new OutputEvent(message + '\n', category));
   }
 
-  // private _terminated(reason: string): void {
-  //   this.log(`Debug Session Ended: ${reason}`);
-  //   this.closeServer();
-  //   this.closeConnection();
-
-  //   if (!this._isTerminated) {
-  //     this._isTerminated = true;
-  //     this.sendEvent(new TerminatedEvent());
-  //   }
-  // }
-
   private async lauchWebFClient(args: LaunchRequestArguments) {
     let entryPoint = args.program || args.url;
 
     if (!entryPoint) {
-      vscode.window.showErrorMessage('Please add `url` or `program` property on your debugger launch config.', {modal: true});
+      vscode.window.showErrorMessage('Please add `url` or `program` property on your debugger launch config.', { modal: true });
       return;
     }
 
@@ -336,12 +281,11 @@ export class QuickJSDebugSession extends SourcemapSession {
     this._webfApp!.stdout!.on('data', (data) => {
       this.log(data.toString(), 'stdout');
     });
-    console.log(entryPoint);
   }
 
   private async closeWebFClient() {
     if (this._webfApp) {
-      execSync(`kill -s SIGTERM ${this._webfApp.pid}`, {shell: '/bin/bash'});
+      execSync(`kill -s SIGTERM ${this._webfApp.pid}`, { shell: '/bin/bash' });
     }
   }
 
@@ -351,36 +295,10 @@ export class QuickJSDebugSession extends SourcemapSession {
       this._remoteClient = undefined;
     }
   }
-  private async closeConnection() {
-    // if (this._connection) { this._connection.destroy(); }
-    // this._connection = undefined;
-    this._threads.clear();
-  }
 
   protected async terminateRequest(response: DebugProtocol.TerminateResponse, args: DebugProtocol.TerminateArguments, request?: DebugProtocol.Request) {
     this.closeServer();
     this.sendResponse(response);
-  }
-
-  private async sendBreakpointMessage(file: string) {
-    const breakpoints: DebugProtocol.SourceBreakpoint[] = [];
-
-    for (let bpList of this._breakpoints.values()) {
-      for (let bp of bpList.filter(bp => bp.source === file)) {
-        breakpoints.push({
-          line: bp.line,
-          column: bp.column,
-        });
-      }
-    }
-    const envelope = {
-      type: 'breakpoints',
-      breakpoints: {
-        path: file,
-        breakpoints: breakpoints.length ? breakpoints : undefined,
-      },
-    };
-    this.sendThreadMessage(envelope);
   }
 
   protected async setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments) {
@@ -395,141 +313,87 @@ export class QuickJSDebugSession extends SourcemapSession {
       return;
     }
 
-    // before clobbering the map entry, note which files currently have mapped breakpoints.
-    const dirtySources = new Set<string>();
-    for (const existingBreakpoint of (this._breakpoints.get(args.source.path) || [])) {
-      dirtySources.add(existingBreakpoint.source);
-    }
-
-    // // map the new breakpoints for a file, and mapped files that get touched.
-    // const bps = args.breakpoints || [];
-    // const mappedBreakpoints: MappedPosition[] = [];
-    // for (let bp of bps) {
-    //   const mappedPositions = await this.translateFileLocationToRemote({
-    //     source: args.source.path,
-    //     column: bp.column || 0,
-    //     line: bp.line,
-    //   });
-
-    //   for (let mapped of mappedPositions) {
-    //     dirtySources.add(mapped.source);
-    //     mappedBreakpoints.push(mapped);
-    //   }
-    // }
-
     // update the entry for this file
-    // if (args.breakpoints) {
-    //   this._breakpoints.set(args.source.path, mappedBreakpoints);
-    // }
-    // else {
-    //   this._breakpoints.delete(args.source.path);
-    // }
-
-    for (let file of dirtySources) {
-      await this.sendBreakpointMessage(file);
+    if (args.breakpoints) {
+      this._breakpoints.set(args.source.path, args.breakpoints);
     }
+    else {
+      this._breakpoints.delete(args.source.path);
+    }
+
+    await this.sendThreadRequest({
+      type: 'request',
+      command: 'setBreakpoints',
+      arguments: args,
+      seq: _seq++
+    });
+
     this.sendResponse(response);
   }
 
-  protected setExceptionBreakPointsRequest(response: DebugProtocol.SetExceptionBreakpointsResponse, args: DebugProtocol.SetExceptionBreakpointsArguments, request?: DebugProtocol.Request) {
-    this.sendResponse(response);
-
-    this._stopOnException = args.filters.length > 0;
-
-    this.sendThreadMessage({
-      type: 'stopOnException',
-      stopOnException: this._stopOnException,
+  protected async setExceptionBreakPointsRequest(response: DebugProtocol.SetExceptionBreakpointsResponse, args: DebugProtocol.SetExceptionBreakpointsArguments, request?: DebugProtocol.Request) {
+    await this.sendThreadRequest({
+      type: 'request',
+      command: 'setExceptionBreakpoints',
+      arguments: args,
+      seq: _seq++
     });
+    this.sendResponse(response);
   }
 
   protected async threadsRequest(response: DebugProtocol.ThreadsResponse): Promise<void> {
-    if (this._threads.size === 0) {
-      await new Promise<void>((resolve, reject) => {
-        this.once('quickjs-thread', () => {
-          resolve();
-        });
-      });
-    }
-    response.body = {
-      threads: Array.from(this._threads.keys()).map(thread => new Thread(thread, `thread 0x${thread.toString(16)}`))
-    };
+    const threadResponse = await this.sendThreadRequest<DebugProtocol.ThreadsResponse>({
+      type: 'request',
+      command: 'threads',
+      arguments: null,
+      seq: _seq++
+    });
+    response.body = threadResponse.body;
     this.sendResponse(response);
   }
 
   protected async stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments) {
-    // const thread = args.threadId;
-    // const body = await this.sendThreadRequest(args.threadId, response, args);
+    const stackTraceResponse = await this.sendThreadRequest<DebugProtocol.StackTraceResponse>({
+      type: 'request',
+      command: 'stackTrace',
+      arguments: args,
+      seq: _seq++
+    });
 
-    // const stackFrames: StackFrame[] = [];
-    // for (const { id, name, filename, line, column } of body) {
-    //   let mappedId = id + thread;
-    //   this._stackFrames.set(mappedId, thread);
-
-    //   try {
-    //     const mappedLocation = await this.translateRemoteLocationToLocal({
-    //       source: filename,
-    //       line: line || 0,
-    //       column: column || 0,
-    //     });
-    //     if (!mappedLocation.source) { throw new Error('map failed'); }
-    //     const source = new Source(basename(mappedLocation.source), this.convertClientPathToDebugger(mappedLocation.source));
-    //     stackFrames.push(new StackFrame(mappedId, name, source, mappedLocation.line, mappedLocation.column));
-    //   }
-    //   catch (e) {
-    //     stackFrames.push(new StackFrame(mappedId, name, filename, line, column));
-    //   }
-    // }
-
-    // const totalFrames = body.length;
-
-    // response.body = {
-    //   stackFrames,
-    //   totalFrames,
-    // };
-    // this.sendResponse(response);
+    response.body = stackTraceResponse.body;
+    this.sendResponse(response);
   }
 
   protected async scopesRequest(response: DebugProtocol.ScopesResponse, args: DebugProtocol.ScopesArguments) {
-    const thread = this._stackFrames.get(args.frameId);
-    if (!thread) {
-      this.sendErrorResponse(response, 2030, 'scopesRequest: thread not found');
-      return;
-    }
-    args.frameId -= thread;
-    const body = await this.sendThreadRequest(thread, response, args);
-    const scopes = body.map(({ name, reference, expensive }) => {
-      // todo: use counter mapping
-      let mappedReference = reference + thread;
-      this._variables.set(mappedReference, thread);
-      return new Scope(name, mappedReference, expensive);
+    const scopeResponse = await this.sendThreadRequest<DebugProtocol.ScopesResponse>({
+      type: 'request',
+      command: 'scopes',
+      arguments: args,
+      seq: _seq++
     });
-
-    response.body = {
-      scopes,
-    };
+    response.body = scopeResponse.body;
     this.sendResponse(response);
   }
 
   protected async variablesRequest(response: DebugProtocol.VariablesResponse, args: DebugProtocol.VariablesArguments, request?: DebugProtocol.Request) {
-    const thread = this._variables.get(args.variablesReference);
-    if (!thread) {
-      this.sendErrorResponse(response, 2030, 'scopesRequest: thread not found');
-      return;
-    }
+    // const thread = this._variables.get(args.variablesReference);
+    // if (!thread) {
+    //   this.sendErrorResponse(response, 2030, 'scopesRequest: thread not found');
+    //   return;
+    // }
+    // args.variablesReference -= thread;
+    // const body = await this.sendThreadRequest(thread, response, args);
+    // const variables = body.map(({ name, value, type, variablesReference, indexedVariables }) => {
+    //   // todo: use counter mapping
+    //   variablesReference = variablesReference ? variablesReference + thread : 0;
+    //   this._variables.set(variablesReference, thread);
+    //   return { name, value, type, variablesReference, indexedVariables };
+    // });
 
-    args.variablesReference -= thread;
-    const body = await this.sendThreadRequest(thread, response, args);
-    const variables = body.map(({ name, value, type, variablesReference, indexedVariables }) => {
-      // todo: use counter mapping
-      variablesReference = variablesReference ? variablesReference + thread : 0;
-      this._variables.set(variablesReference, thread);
-      return { name, value, type, variablesReference, indexedVariables };
-    });
-
-    response.body = {
-      variables,
-    };
-    this.sendResponse(response);
+    // response.body = {
+    //   variables,
+    // };
+    // this.sendResponse(response);
   }
 
   private sendThreadMessage(message: any) {
@@ -551,124 +415,143 @@ export class QuickJSDebugSession extends SourcemapSession {
     this._wsConnection?.sendUTF(json);
   }
 
-  private sendThreadRequest(thread: number, response: DebugProtocol.Response, args: any): Promise<any> {
+  private sendThreadRequest<T>(request: DebugProtocol.Request): Promise<T> {
     return new Promise((resolve, reject) => {
-      let request_seq = response.request_seq;
-      // todo: don't actually need to cache this. can send across wire.
-      this._requests.set(request_seq, {
+      this._requests.set(request.seq, {
         resolve,
-        reject,
+        reject
       });
 
-      let envelope = {
-        type: 'request',
-        request: {
-          request_seq,
-          command: response.command,
-          args,
-        }
-      };
-
-      this.sendThreadMessage(envelope);
+      this.sendThreadMessage(request);
     });
   }
 
   protected async continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments) {
-    response.body = await this.sendThreadRequest(args.threadId, response, args);
+    const threadResponse = await this.sendThreadRequest<DebugProtocol.ContinueResponse>({
+      type: 'request',
+      command: 'continue',
+      arguments: args,
+      seq: _seq++
+    });
+    response.body = threadResponse.body;
     this.sendResponse(response);
   }
 
   protected async nextRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments) {
-    response.body = await this.sendThreadRequest(args.threadId, response, args);
+    const threadResponse = await this.sendThreadRequest<DebugProtocol.ContinueResponse>({
+      type: 'request',
+      command: 'next',
+      arguments: args,
+      seq: _seq++
+    });
+    response.body = threadResponse.body;
     this.sendResponse(response);
   }
 
   protected async stepInRequest(response: DebugProtocol.StepInResponse, args: DebugProtocol.StepInArguments, request?: DebugProtocol.Request) {
-    response.body = await this.sendThreadRequest(args.threadId, response, args);
+    const threadResponse = await this.sendThreadRequest<DebugProtocol.ContinueResponse>({
+      type: 'request',
+      command: 'stepIn',
+      arguments: args,
+      seq: _seq++
+    });
+    response.body = threadResponse.body;
     this.sendResponse(response);
   }
 
   protected async stepOutRequest(response: DebugProtocol.StepOutResponse, args: DebugProtocol.StepOutArguments, request?: DebugProtocol.Request) {
-    response.body = await this.sendThreadRequest(args.threadId, response, args);
+    const threadResponse = await this.sendThreadRequest<DebugProtocol.ContinueResponse>({
+      type: 'request',
+      command: 'stepOut',
+      arguments: args,
+      seq: _seq++
+    });
+    response.body = threadResponse.body;
     this.sendResponse(response);
   }
 
   protected async evaluateRequest(response: DebugProtocol.EvaluateResponse, args: DebugProtocol.EvaluateArguments) {
-    if (!args.frameId) {
-      this.sendErrorResponse(response, 2030, 'scopesRequest: frameId not specified');
-      return;
-    }
-    let thread = this._stackFrames.get(args.frameId);
-    if (!thread) {
-      this.sendErrorResponse(response, 2030, 'scopesRequest: thread not found');
-      return;
-    }
-    args.frameId -= thread;
+    // if (!args.frameId) {
+    //   this.sendErrorResponse(response, 2030, 'scopesRequest: frameId not specified');
+    //   return;
+    // }
+    // let thread = this._stackFrames.get(args.frameId);
+    // if (!thread) {
+    //   this.sendErrorResponse(response, 2030, 'scopesRequest: thread not found');
+    //   return;
+    // }
+    // args.frameId -= thread;
 
-    const body = await this.sendThreadRequest(thread, response, args);
-    let variablesReference = body.variablesReference;
-    variablesReference = variablesReference ? variablesReference + thread : 0;
-    this._variables.set(variablesReference, thread);
-    body.variablesReference = variablesReference;
+    // const body = await this.sendThreadRequest(thread, response, args);
+    // let variablesReference = body.variablesReference;
+    // variablesReference = variablesReference ? variablesReference + thread : 0;
+    // this._variables.set(variablesReference, thread);
+    // body.variablesReference = variablesReference;
 
-    response.body = body;
-    this.sendResponse(response);
+    // response.body = body;
+    // this.sendResponse(response);
   }
 
   protected async pauseRequest(response: DebugProtocol.PauseResponse, args: DebugProtocol.PauseArguments, request?: DebugProtocol.Request) {
-    response.body = await this.sendThreadRequest(args.threadId, response, args);
+    const threadResponse = await this.sendThreadRequest<DebugProtocol.ContinueResponse>({
+      type: 'request',
+      command: 'pause',
+      arguments: args,
+      seq: _seq++
+    });
+    response.body = threadResponse.body;
     this.sendResponse(response);
   }
 
   protected async completionsRequest(response: DebugProtocol.CompletionsResponse, args: DebugProtocol.CompletionsArguments) {
-    if (!args.frameId) {
-      this.sendErrorResponse(response, 2030, 'completionsRequest: frameId not specified');
-      return;
-    }
-    let thread = this._stackFrames.get(args.frameId);
-    if (!thread) {
-      this.sendErrorResponse(response, 2030, 'completionsRequest: thread not found');
-      return;
-    }
-    args.frameId -= thread;
+    // if (!args.frameId) {
+    //   this.sendErrorResponse(response, 2030, 'completionsRequest: frameId not specified');
+    //   return;
+    // }
+    // let thread = this._stackFrames.get(args.frameId);
+    // if (!thread) {
+    //   this.sendErrorResponse(response, 2030, 'completionsRequest: thread not found');
+    //   return;
+    // }
+    // args.frameId -= thread;
 
-    let expression = args.text.substr(0, args.text.length - 1);
-    if (!expression) {
-      this.sendErrorResponse(response, 2032, "no completion available for empty string");
-      return;
-    }
+    // let expression = args.text.substr(0, args.text.length - 1);
+    // if (!expression) {
+    //   this.sendErrorResponse(response, 2032, "no completion available for empty string");
+    //   return;
+    // }
 
-    const evaluateArgs: DebugProtocol.EvaluateArguments = {
-      frameId: args.frameId,
-      expression,
-    };
-    response.command = 'evaluate';
+    // const evaluateArgs: DebugProtocol.EvaluateArguments = {
+    //   frameId: args.frameId,
+    //   expression,
+    // };
+    // response.command = 'evaluate';
 
-    let body = await this.sendThreadRequest(thread, response, evaluateArgs);
-    if (!body.variablesReference) {
-      this.sendErrorResponse(response, 2032, "no completion available for expression");
-      return;
-    }
+    // let body = await this.sendThreadRequest(thread, response, evaluateArgs);
+    // if (!body.variablesReference) {
+    //   this.sendErrorResponse(response, 2032, "no completion available for expression");
+    //   return;
+    // }
 
-    if (body.indexedVariables !== undefined) {
-      this.sendErrorResponse(response, 2032, "no completion available for arrays");
-      return;
-    }
+    // if (body.indexedVariables !== undefined) {
+    //   this.sendErrorResponse(response, 2032, "no completion available for arrays");
+    //   return;
+    // }
 
-    const variableArgs: DebugProtocol.VariablesArguments = {
-      variablesReference: body.variablesReference,
-    };
-    response.command = 'variables';
-    body = await this.sendThreadRequest(thread, response, variableArgs);
+    // const variableArgs: DebugProtocol.VariablesArguments = {
+    //   variablesReference: body.variablesReference,
+    // };
+    // response.command = 'variables';
+    // body = await this.sendThreadRequest(thread, response, variableArgs);
 
-    response.command = 'completions';
-    response.body = {
-      targets: body.map(property => ({
-        label: property.name,
-        type: 'field',
-      }))
-    };
+    // response.command = 'completions';
+    // response.body = {
+    //   targets: body.map(property => ({
+    //     label: property.name,
+    //     type: 'field',
+    //   }))
+    // };
 
-    this.sendResponse(response);
+    // this.sendResponse(response);
   }
 }

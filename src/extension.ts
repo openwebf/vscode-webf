@@ -13,7 +13,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 async function checkWebFCommand() {
-  let result = spawnSync('type', ['webf'], { encoding: 'utf-8' });
+  let result = spawnSync('type', ['webf'], { encoding: 'utf-8'});
   if (result.status !== 0) {
     const selection = await vscode.window.showWarningMessage('The `webf` command not found on PATH.', 'Install it for me', 'Ignore');
     if (selection === 'Install it for me') {

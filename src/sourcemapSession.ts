@@ -1,18 +1,16 @@
-import { BasicSourceMapConsumer, MappedPosition, SourceMapConsumer } from 'source-map';
 import { LoggingDebugSession } from 'vscode-debugadapter';
-import { SourcemapArguments } from "./sourcemapArguments";
 const path = require('path');
 const fs = require('fs');
 
 export abstract class SourcemapSession extends LoggingDebugSession {
   // a map of all absolute file sources found in the sourcemaps
-  private _fileToSourceMap = new Map<string, BasicSourceMapConsumer>();
-  private _sourceMapsLoading: Promise<any> | undefined;
-  // keep track of the sourcemaps and the location of the file.map used to load it
-  private _sourceMaps = new Map<BasicSourceMapConsumer, string>();
+  // private _fileToSourceMap = new Map<string, BasicSourceMapConsumer>();
+  // private _sourceMapsLoading: Promise<any> | undefined;
+  // // keep track of the sourcemaps and the location of the file.map used to load it
+  // private _sourceMaps = new Map<BasicSourceMapConsumer, string>();
 
-  abstract logTrace(message: string): Promise<void>;
-  abstract getArguments(): Promise<SourcemapArguments>;
+  // abstract logTrace(message: string): Promise<void>;
+  // abstract getArguments(): Promise<SourcemapArguments>;
 
   // async loadSourceMaps() {
   //   const commonArgs = await this.getArguments();
