@@ -35,13 +35,9 @@ export class QuickJSDebugSession extends LoggingDebugSession {
   private _webfApp?: ChildProcess;
   private _remoteClient?: WebSocket.client;
   private _wsConnection?: WebSocket.connection;
-  private _supportsRunInTerminalRequest = false;
-  private _console: ConsoleType = 'internalConsole';
   private _pendingMessages: any[] = [];
   private _requests = new Map<number, PendingResponse>();
   private _breakpoints = new Map<string, DebugProtocol.BreakpointLocation[]>();
-  private _stopOnException = false;
-  private _variables = new Map<number, number>();
 
   public constructor() {
     super("quickjs-debug.txt");
@@ -51,10 +47,6 @@ export class QuickJSDebugSession extends LoggingDebugSession {
   }
 
   protected initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): void {
-    if (typeof args.supportsRunInTerminalRequest === 'boolean') {
-      this._supportsRunInTerminalRequest = args.supportsRunInTerminalRequest;
-    }
-
     // build and return the capabilities of this debug adapter:
     response.body = response.body || {};
 
@@ -426,54 +418,13 @@ export class QuickJSDebugSession extends LoggingDebugSession {
   }
 
   protected async completionsRequest(response: DebugProtocol.CompletionsResponse, args: DebugProtocol.CompletionsArguments) {
-    // if (!args.frameId) {
-    //   this.sendErrorResponse(response, 2030, 'completionsRequest: frameId not specified');
-    //   return;
-    // }
-    // let thread = this._stackFrames.get(args.frameId);
-    // if (!thread) {
-    //   this.sendErrorResponse(response, 2030, 'completionsRequest: thread not found');
-    //   return;
-    // }
-    // args.frameId -= thread;
-
-    // let expression = args.text.substr(0, args.text.length - 1);
-    // if (!expression) {
-    //   this.sendErrorResponse(response, 2032, "no completion available for empty string");
-    //   return;
-    // }
-
-    // const evaluateArgs: DebugProtocol.EvaluateArguments = {
-    //   frameId: args.frameId,
-    //   expression,
-    // };
-    // response.command = 'evaluate';
-
-    // let body = await this.sendThreadRequest(thread, response, evaluateArgs);
-    // if (!body.variablesReference) {
-    //   this.sendErrorResponse(response, 2032, "no completion available for expression");
-    //   return;
-    // }
-
-    // if (body.indexedVariables !== undefined) {
-    //   this.sendErrorResponse(response, 2032, "no completion available for arrays");
-    //   return;
-    // }
-
-    // const variableArgs: DebugProtocol.VariablesArguments = {
-    //   variablesReference: body.variablesReference,
-    // };
-    // response.command = 'variables';
-    // body = await this.sendThreadRequest(thread, response, variableArgs);
-
-    // response.command = 'completions';
-    // response.body = {
-    //   targets: body.map(property => ({
-    //     label: property.name,
-    //     type: 'field',
-    //   }))
-    // };
-
-    // this.sendResponse(response);
+    const debuggerResponse = await this.sendRequestToDebugger<DebugProtocol.CompletionsResponse>({
+      type: 'request',
+      command: 'completions',
+      arguments: args,
+      seq: _seq++
+    });
+    response.body = debuggerResponse.body;
+    this.sendResponse(response);
   }
 }
