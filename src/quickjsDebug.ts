@@ -21,8 +21,6 @@ interface AttachRequestArguments extends DebugProtocol.AttachRequestArguments {
   host?: string;
 }
 
-type ConsoleType = 'internalConsole' | 'integratedTerminal' | 'externalTerminal';
-
 interface PendingResponse {
   resolve: Function;
   reject: Function;
@@ -86,7 +84,6 @@ export class QuickJSDebugSession extends LoggingDebugSession {
       this.logTrace(`request not found: ${seq}`);
       return;
     }
-    console.log(`Request ${seq} responsed: ${response.command}`);
     this._requests.delete(seq);
     pending.resolve(response);
   }
@@ -105,6 +102,11 @@ export class QuickJSDebugSession extends LoggingDebugSession {
         if (body.reason !== 'entry') {
           this.sendEvent(event);
         }
+        break;
+      }
+      case 'output': {
+        const e = (event as DebugProtocol.OutputEvent);
+        this.sendEvent(e);
         break;
       }
     }
@@ -180,6 +182,7 @@ export class QuickJSDebugSession extends LoggingDebugSession {
 
   public async logTrace(message: string) {
     // if (this._commonArgs!.trace) { this.log(message); }
+    this.log(message);
   }
 
   public log(message: string, category: string = 'console') {
@@ -195,10 +198,6 @@ export class QuickJSDebugSession extends LoggingDebugSession {
     }
 
     this._webfApp = spawn('webf', ['run', entryPoint, '--remote-debugging-port', QuickJSDebugSession.REMOTE_DEBUGGING_PORT.toString()]);
-
-    this._webfApp!.stdout!.on('data', (data) => {
-      this.log(data.toString(), 'stdout');
-    });
   }
 
   private async closeWebFClient() {
@@ -223,8 +222,6 @@ export class QuickJSDebugSession extends LoggingDebugSession {
     response.body = {
       breakpoints: []
     };
-
-    this.logTrace(`setBreakPointsRequest: ${JSON.stringify(args)}`);
 
     if (!args.source.path) {
       this.sendResponse(response);
@@ -327,7 +324,6 @@ export class QuickJSDebugSession extends LoggingDebugSession {
       return;
     }
 
-    this.logTrace(`sent: ${JSON.stringify(message)}`);
     let json = JSON.stringify({
       vscode: true,
       data: message
@@ -391,8 +387,7 @@ export class QuickJSDebugSession extends LoggingDebugSession {
   }
 
   protected async evaluateRequest(response: DebugProtocol.EvaluateResponse, args: DebugProtocol.EvaluateArguments) {
-    if (!args.frameId) {
-      this.sendErrorResponse(response, 2030, 'scopesRequest: frameId not specified');
+    if (args.expression.length === 0) {
       return;
     }
 
