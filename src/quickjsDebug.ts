@@ -1,6 +1,7 @@
 // import * as CP from 'child_process';
 import * as WebSocket from 'websocket';
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { spawn, ChildProcess, execSync } from 'child_process';
 import { InitializedEvent, Logger, logger, OutputEvent, Scope, Source, StackFrame, StoppedEvent, Thread, ThreadEvent } from 'vscode-debugadapter';
 import { DebugProtocol } from 'vscode-debugprotocol';
@@ -24,6 +25,10 @@ interface AttachRequestArguments extends DebugProtocol.AttachRequestArguments {
 interface PendingResponse {
   resolve: Function;
   reject: Function;
+}
+
+function replacePath(oldPath: string) {
+  return oldPath.replace('webpack://app', vscode.workspace.rootPath ?? '').replace(/\?\w+/, '');
 }
 
 export class QuickJSDebugSession extends LoggingDebugSession {
@@ -106,6 +111,11 @@ export class QuickJSDebugSession extends LoggingDebugSession {
       }
       case 'output': {
         const e = (event as DebugProtocol.OutputEvent);
+        const source = e.body.source;
+        if (source) {
+          source.path = replacePath(source.path ?? '');
+        }
+        
         this.sendEvent(e);
         break;
       }
@@ -227,6 +237,9 @@ export class QuickJSDebugSession extends LoggingDebugSession {
       this.sendResponse(response);
       return;
     }
+
+    // Replace source path relative to current project root.
+    // args.source.path = `app://${args.source.path.replace(vscode.workspace.rootPath ?? '', '')}`;
 
     // update the entry for this file
     if (args.breakpoints) {
