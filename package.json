@@ -10,14 +10,66 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:vscode-webf.helloWorld"
+    "*",
+    "onCommand:webf.runDebug",
+    "onDebug"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "vscode-webf.helloWorld",
-        "title": "Hello World"
+        "command": "webf.runDebug",
+        "title": "Debug WebF Apps"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "webf",
+        "label": "WebF",
+        "languages": ["javascript", "html", "vue"],
+        "initialConfigurations": [
+          {
+            "type": "webf",
+            "request": "launch",
+            "name": "Launch Program",
+            "url": "http://localhost:3000"
+          },
+          {
+            "type": "webf",
+            "request": "attach",
+            "name": "Attach to WebF App",
+            "port": 9222,
+            "host": "localhost"
+          }
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["url"],
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "The page url which webf opens."
+              },
+              "program": {
+                "type": "string",
+                "description": "The main page entry"
+              }
+            }
+          },
+          "attach": {
+            "required": [],
+            "properties": {
+              "port": {
+                "type": "number",
+                "description": "the port which WebF debugger server listen to. default to 9222"
+              },
+              "host": {
+                "type": "string",
+                "description": "the host which WebF debugger server listen to. default to localhost"
+              }
+            }
+          }
+        }
       }
     ]
   },
@@ -49,6 +101,9 @@
     "webpack-cli": "^4.10.0"
   },
   "dependencies": {
+    "@types/websocket": "^1.0.5",
+    "source-map": "^0.7.4",
+    "vscode-debugadapter": "^1.51.0",
     "websocket": "^1.0.34"
   }
 }
